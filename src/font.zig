@@ -1,8 +1,12 @@
 const std = @import("std");
 const assert = @import("std").debug.assert;
-const print = @import("std").debug.print;
+const print = @import("main.zig").print;
 const Endian = @import("std").builtin.Endian;
 const Allocator = @import("std").mem.Allocator;
+const DrawBuffer = @import("main.zig").DrawBuffer;
+const Color = @import("main.zig").Color;
+const builtin = @import("builtin");
+const dbg = builtin.mode == builtin.Mode.Debug;
 
 const TableRecord = struct {
     tag: [4]u8,
@@ -13,19 +17,21 @@ const TableRecord = struct {
 
 var HEAD: Head = undefined;
 var MAXP: Maxp = undefined;
+var records: []TableRecord = undefined;
+var glyphs: []Glyph = undefined;
+var locs: []u32 = undefined;
 
-pub fn ttf_parse(allocator: Allocator, bytes: []const u8) !void {
+pub fn ttf_load(allocator: Allocator, bytes: []const u8) !void {
     const num_tables = std.mem.readInt(u16, bytes[4..6], Endian.big);
     print("num tables: {}\n", .{num_tables});
     const table_records = bytes[12..(12 + @sizeOf(TableRecord) * num_tables)];
 
-    const records = try allocator.alloc(TableRecord, num_tables);
-    defer allocator.free(records);
+    records = try allocator.alloc(TableRecord, num_tables);
 
     for (0..num_tables) |i| {
         const off = i * 16;
         @memcpy(&records[i].tag, table_records[off..(off + 4)]);
-        records[i].checksum = std.mem.readInt(u32, table_records[(off)..(off + 4)][0..4], Endian.big);
+        records[i].checksum = std.mem.readInt(u32, table_records[(off + 4)..(off + 8)][0..4], Endian.big);
         records[i].offset = std.mem.readInt(u32, table_records[(off + 8)..(off + 12)][0..4], Endian.big);
         records[i].length = std.mem.readInt(u32, table_records[(off + 12)..(off + 16)][0..4], Endian.big);
         print("record {s} offset: {}\n", .{ records[i].tag, records[i].offset });
@@ -40,15 +46,18 @@ pub fn ttf_parse(allocator: Allocator, bytes: []const u8) !void {
             print("maxp: {}\n", .{MAXP});
         }
     }
-    const locs = try loca(allocator, HEAD.index_to_loc_format, bytes[find_record(num_tables, records, "loca").?.offset..]);
+    locs = try allocator.alloc(u32, MAXP.num_glyphs);
+    try loca(HEAD.index_to_loc_format, bytes[find_record(num_tables, "loca").?.offset..]);
     print("locs length: {}\n", .{locs.len});
-    const glyphs = try glyf(allocator, bytes[find_record(num_tables, records, "glyf").?.offset..], locs);
+    glyphs = try allocator.alloc(Glyph, MAXP.num_glyphs);
+    try glyf(allocator, bytes[find_record(num_tables, "glyf").?.offset..]);
+}
 
+pub fn ttf_unload(allocator: Allocator) void {
     for (0..glyphs.len) |i| {
         switch (glyphs[i].data) {
             .simple => {
-                allocator.free(glyphs[i].data.simple.x_coords);
-                allocator.free(glyphs[i].data.simple.y_coords);
+                allocator.free(glyphs[i].data.simple.coords);
                 allocator.free(glyphs[i].data.simple.end_pts_of_contour);
                 allocator.free(glyphs[i].data.simple.flags);
             },
@@ -57,9 +66,69 @@ pub fn ttf_parse(allocator: Allocator, bytes: []const u8) !void {
             },
         }
     }
+    allocator.free(locs);
+    allocator.free(records);
+    allocator.free(glyphs);
 }
 
-fn find_record(num_tables: usize, records: []TableRecord, tag: []const u8) ?TableRecord {
+pub fn draw(target_buf: DrawBuffer) void {
+    const g = glyphs[0];
+    const font_size = 12;
+    const ppi = 227;
+    const ppem = font_size * ppi / 72;
+
+    switch (g.data) {
+        .simple => |d| {
+            for (1..d.coords.len) |c| {
+                const p1 = d.coords[c - 1];
+                const p2 = d.coords[c];
+
+                const from_x = @as(u32, @intCast(p1.x)) * ppem / HEAD.units_per_em;
+                const from_y = @as(u32, @intCast(p1.y)) * ppem / HEAD.units_per_em;
+                const to_x = @as(u32, @intCast(p2.x)) * ppem / HEAD.units_per_em;
+                const to_y = @as(u32, @intCast(p2.y)) * ppem / HEAD.units_per_em;
+                print("going from {},{} to {},{}\r\n", .{ from_x, from_y, to_x, to_y });
+                const dx: i64 = @as(i64, @intCast(to_x)) - @as(i64, @intCast(from_x));
+                const dy: i64 = @as(i64, @intCast(to_y)) - @as(i64, @intCast(from_y));
+                const pixel_dx: i8 = if (dx > 0) 1 else -1;
+                const pixel_dy: i8 = if (dy > 0) 1 else -1;
+                var D: i64 = 2 * dy - dx;
+                var cursor_x: i64 = from_x;
+                var cursor_y: i64 = from_y;
+                if (@abs(dx) >= @abs(dy)) {
+                    while (cursor_x != to_x) {
+                        target_buf.blit(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
+                        cursor_x += pixel_dx;
+                        if (cursor_y != to_y) {
+                            if (D > 0) {
+                                cursor_y += pixel_dy;
+                                D += 2 * dy - 2 * dx;
+                            } else {
+                                D += 2 * dy;
+                            }
+                        }
+                    }
+                } else {
+                    while (cursor_y != to_y) {
+                        target_buf.blit(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
+                        cursor_y += pixel_dy;
+                        if (cursor_x != to_x) {
+                            if (D > 0) {
+                                cursor_x += pixel_dx;
+                                D += 2 * dy - 2 * dx;
+                            } else {
+                                D += 2 * dy;
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        .compound => {},
+    }
+}
+
+fn find_record(num_tables: usize, tag: []const u8) ?TableRecord {
     for (0..num_tables) |i| {
         const record = records[i];
         if (std.mem.eql(u8, tag, &record.tag)) {
@@ -69,8 +138,7 @@ fn find_record(num_tables: usize, records: []TableRecord, tag: []const u8) ?Tabl
     return null;
 }
 
-fn loca(allocator: Allocator, format: i16, bytes: []const u8) ![]u32 {
-    var locs = try allocator.alloc(u32, MAXP.num_glyphs);
+fn loca(format: i16, bytes: []const u8) !void {
     if (format == 0) {
         // missing character glyph at 0
         for (0..MAXP.num_glyphs) |i| {
@@ -84,7 +152,6 @@ fn loca(allocator: Allocator, format: i16, bytes: []const u8) ![]u32 {
     } else {
         @panic("invalid loca format");
     }
-    return locs;
 }
 
 const GlyphDataKind = enum(u8) {
@@ -95,8 +162,12 @@ const GlyphDataKind = enum(u8) {
 const SimpleData = struct {
     end_pts_of_contour: []u16,
     flags: []u8,
-    x_coords: []i16,
-    y_coords: []i16,
+    coords: []Coord,
+};
+
+const Coord = struct {
+    x: u16,
+    y: u16,
 };
 
 const GlyphData = union(GlyphDataKind) {
@@ -112,9 +183,8 @@ const Glyph = struct {
     data: GlyphData,
 };
 
-fn glyf(allocator: Allocator, bytes: []const u8, locs: []u32) ![]Glyph {
-    var glyphs = try allocator.alloc(Glyph, MAXP.num_glyphs);
-    for (0..MAXP.num_glyphs) |i| {
+fn glyf(allocator: Allocator, bytes: []const u8) !void {
+    for (0..locs.len) |i| {
         var byte_ptr = bytes[locs[i]..].ptr;
         var g = &glyphs[i];
         g.num_contours = std.mem.readInt(i16, byte_ptr[0..2], Endian.big);
@@ -122,6 +192,7 @@ fn glyf(allocator: Allocator, bytes: []const u8, locs: []u32) ![]Glyph {
         g.y_min = std.mem.readInt(i16, byte_ptr[4..6], Endian.big);
         g.x_max = std.mem.readInt(i16, byte_ptr[6..8], Endian.big);
         g.y_max = std.mem.readInt(i16, byte_ptr[8..10], Endian.big);
+        // print("{}\r\n", .{g});
         byte_ptr += 10;
         if (g.num_contours < 0) {
             // TODO: handle compound glyphs
@@ -131,14 +202,13 @@ fn glyf(allocator: Allocator, bytes: []const u8, locs: []u32) ![]Glyph {
             var data = GlyphData{ .simple = SimpleData{
                 .end_pts_of_contour = undefined,
                 .flags = undefined,
-                .x_coords = undefined,
-                .y_coords = undefined,
+                .coords = undefined,
             } };
             var end_pts_of_contour = try allocator.alloc(u16, @intCast(g.num_contours));
             data.simple.end_pts_of_contour = end_pts_of_contour;
             for (0..@intCast(g.num_contours)) |j| {
                 end_pts_of_contour[j] = std.mem.readInt(u16, byte_ptr[0..2], Endian.big);
-                byte_ptr += @sizeOf(u16);
+                byte_ptr += 2;
             }
             // skip past instructions
             byte_ptr += 2 + std.mem.readInt(u16, byte_ptr[0..2], Endian.big);
@@ -146,8 +216,13 @@ fn glyf(allocator: Allocator, bytes: []const u8, locs: []u32) ![]Glyph {
             var flags = try allocator.alloc(u8, @intCast(num_points));
             data.simple.flags = flags;
 
+            const x_short_mask = 1;
+            const y_short_mask = 2;
+            const repeat_mask = 3;
+            const x_same_mask = 4;
+            const y_same_mask = 5;
+
             var repeat: u8 = 0;
-            const repeat_mask = 8;
             for (0..num_points) |j| {
                 if (repeat > 0) {
                     flags[j] = flags[j - 1];
@@ -157,68 +232,96 @@ fn glyf(allocator: Allocator, bytes: []const u8, locs: []u32) ![]Glyph {
 
                 flags[j] = byte_ptr[0];
                 byte_ptr += 1;
-                if ((flags[j] & repeat_mask) != 0) {
+                if (isBitSet(flags[j], repeat_mask)) {
                     repeat = byte_ptr[0];
                     byte_ptr += 1;
                 }
             }
 
-            const x_short_mask = 2;
-            const y_short_mask = 4;
-            const x_same_mask = 16;
-            const y_same_mask = 32;
-            var x_coords = try allocator.alloc(i16, @intCast(num_points));
-            var y_coords = try allocator.alloc(i16, @intCast(num_points));
-            data.simple.x_coords = x_coords;
-            data.simple.y_coords = y_coords;
+            var coords = try allocator.alloc(Coord, @intCast(num_points));
+            data.simple.coords = coords;
             for (0..num_points) |j| {
                 const flag = flags[j];
+                var x: i16 = 0;
                 if (j != 0) {
-                    x_coords[j] = x_coords[j - 1];
-                } else {
-                    x_coords[j] = 0;
+                    x = @intCast(coords[j - 1].x);
                 }
 
-                if ((flag & x_short_mask) != 0) {
-                    x_coords[j] = byte_ptr[0];
-                    if ((flag & x_same_mask) == 0) {
-                        x_coords[j] = -x_coords[j];
+                if (isBitSet(flag, x_short_mask)) {
+                    if (isBitSet(flag, x_same_mask)) {
+                        x += byte_ptr[0];
+                    } else {
+                        x -= byte_ptr[0];
                     }
                     byte_ptr += 1;
                 } else {
-                    if ((flag & x_same_mask) == 0) {
-                        x_coords[j] += std.mem.readInt(i16, byte_ptr[0..2], Endian.big);
+                    if (!isBitSet(flag, x_same_mask)) {
+                        x += std.mem.readInt(i16, byte_ptr[0..2], Endian.big);
                         byte_ptr += 2;
                     }
                 }
+                // scale x to start from 0
+                if (j == 0)
+                    x -= g.x_min;
+                coords[j].x = @intCast(x);
             }
 
             for (0..num_points) |j| {
                 const flag = flags[j];
-                if (j != 0) {
-                    y_coords[j] = y_coords[j - 1];
-                } else {
-                    y_coords[j] = 0;
-                }
-
-                if ((flag & y_short_mask) != 0) {
-                    y_coords[j] = byte_ptr[0];
-                    if ((flag & y_same_mask) == 0) {
-                        y_coords[j] = -y_coords[j];
+                // This first coordinate is not flipped or scaled, perform as per ttf spec
+                if (j == 0) {
+                    var y: i16 = 0;
+                    if (isBitSet(flag, y_short_mask)) {
+                        if (isBitSet(flag, y_same_mask)) {
+                            y += byte_ptr[0];
+                        } else {
+                            y -= byte_ptr[0];
+                        }
+                        byte_ptr += 1;
+                    } else {
+                        if (!isBitSet(flag, y_same_mask)) {
+                            y += std.mem.readInt(i16, byte_ptr[0..2], Endian.big);
+                            byte_ptr += 2;
+                        }
                     }
-                    byte_ptr += 1;
+                    // scale y to positive
+                    y -= g.y_min;
+                    // flip y since in our coordinate system y increases downwards
+                    y = -y + (g.y_max - g.y_min);
+                    coords[j].y = @intCast(y);
                 } else {
-                    if ((flag & y_same_mask) == 0) {
-                        y_coords[j] += std.mem.readInt(i16, byte_ptr[0..2], Endian.big);
-                        byte_ptr += 2;
+                    // all coordinates are relative from the first one
+                    // deltas are now flipped
+                    var y = coords[j - 1].y;
+                    if (isBitSet(flag, y_short_mask)) {
+                        if (isBitSet(flag, y_same_mask)) {
+                            y -= byte_ptr[0];
+                        } else {
+                            y += byte_ptr[0];
+                        }
+                        byte_ptr += 1;
+                    } else {
+                        if (!isBitSet(flag, y_same_mask)) {
+                            const delta = std.mem.readInt(i16, byte_ptr[0..2], Endian.big);
+                            if (delta > 0) {
+                                y += @intCast(delta);
+                            } else {
+                                y += @intCast(-delta);
+                            }
+                            byte_ptr += 2;
+                        }
                     }
+                    coords[j].y = y;
                 }
             }
             g.data = data;
         }
         if (i == 0) print("glyph: {}\n", .{glyphs[i].data.simple});
     }
-    return glyphs;
+}
+
+fn isBitSet(byte: u8, comptime bit: u3) bool {
+    return ((byte >> bit) & 1) == 1;
 }
 
 const Head = struct {
@@ -250,6 +353,8 @@ test {
     const cwd = std.fs.cwd();
     const f = try cwd.openFile("out/efi/boot/SF-Pro.ttf", std.fs.File.OpenFlags{});
     var buf: [1024 * 1024 * 10]u8 = undefined;
+    print("size: {}\n", .{@sizeOf(u16)});
     const size = try f.readAll(&buf);
-    try ttf_parse(std.testing.allocator, buf[0..size]);
+    try ttf_load(std.testing.allocator, buf[0..size]);
+    ttf_unload(std.testing.allocator);
 }

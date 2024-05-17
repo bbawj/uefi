@@ -1,7 +1,10 @@
-const unicode = @import("std").unicode;
-const uefi = @import("std").os.uefi;
-const fmt = @import("std").fmt;
+const std = @import("std");
+const unicode = std.unicode;
+const uefi = std.os.uefi;
+const fmt = std.fmt;
 const bmp = @import("bmp.zig");
+const font = @import("font.zig");
+const builtin = @import("builtin");
 
 // Assigned in main().
 var con_out: *uefi.protocol.SimpleTextOutput = undefined;
@@ -10,6 +13,8 @@ var resolution_x: usize = undefined;
 var resolution_y: usize = undefined;
 var cursor_x: usize = undefined;
 var cursor_y: usize = undefined;
+
+var volume: *uefi.protocol.File = undefined;
 
 // We need to print each character in an [_]u8 individually because EFI
 // encodes strings as UCS-2.
@@ -20,19 +25,21 @@ fn puts(msg: []const u8) void {
     }
 }
 
-fn printf(buf: []u8, comptime format: []const u8, args: anytype) void {
-    puts(fmt.bufPrint(buf, format, args) catch unreachable);
+var print_buf: [1024]u8 = undefined;
+
+pub fn print(comptime format: []const u8, args: anytype) void {
+    if (builtin.os.tag == .uefi) {
+        if (fmt.bufPrint(&print_buf, format, args)) |written| {
+            puts(written);
+        } else |_| {
+            puts("could not fit in print buffer\r\n");
+        }
+    } else {
+        std.debug.print(format, args);
+    }
 }
 
-fn count(event: uefi.Event, context: ?*anyopaque) callconv(.C) void {
-    counter += 1;
-    _ = event;
-    _ = context;
-    _ = con_out.setCursorPosition(0, 1);
-    var buf: [64]u8 = undefined;
-    printf(buf[0..], "count() has been called {} times.", .{counter});
-}
-
+var graphics_output_protocol: ?*uefi.protocol.GraphicsOutput = undefined;
 pub fn main() void {
     con_out = uefi.system_table.con_out.?;
     puts("testing");
@@ -43,11 +50,9 @@ pub fn main() void {
     _ = con_out.reset(false);
 
     // Graphics output?
-    var buf: [256]u8 = undefined;
-    var graphics_output_protocol: ?*uefi.protocol.GraphicsOutput = undefined;
     status = boot_services.locateProtocol(&uefi.protocol.GraphicsOutput.guid, null, @ptrCast(&graphics_output_protocol));
     if (status != uefi.Status.Success) {
-        printf(buf[0..], "*** graphics output protocol not supported because {}!\r\n", .{status});
+        print("*** graphics output protocol not supported because {}!\r\n", .{status});
         return;
     }
     // Check supported resolutions:
@@ -58,21 +63,21 @@ pub fn main() void {
         while (i < graphics_output_protocol.?.mode.max_mode) : (i += 1) {
             status = graphics_output_protocol.?.queryMode(i, &info_size, &info);
             if (status != uefi.Status.Success) {
-                printf(buf[0..], "unable to query graphics_output_protocol mode because {}\r\n", .{status});
+                print("unable to query graphics_output_protocol mode because {}\r\n", .{status});
                 continue;
             }
-            printf(buf[0..], "graphics_output_protocol mode {} {}\r\n", .{ info.horizontal_resolution, info.vertical_resolution });
+            print("graphics_output_protocol mode {} {}\r\n", .{ info.horizontal_resolution, info.vertical_resolution });
             if (info.horizontal_resolution == 1920 and info.vertical_resolution == 1080) {
                 status = graphics_output_protocol.?.setMode(i);
                 if (status != uefi.Status.Success) {
-                    printf(buf[0..], "unable to set graphics_output_protocol mode because {}\r\n", .{status});
+                    print("unable to set graphics_output_protocol mode because {}\r\n", .{status});
                 }
                 break;
             }
         }
         status = graphics_output_protocol.?.queryMode(graphics_output_protocol.?.mode.mode, &info_size, &info);
         if (status != uefi.Status.Success) {
-            printf(buf[0..], "unable to query the current graphics_output_protocol mode because {}, exiting...\r\n", .{status});
+            print("unable to query the current graphics_output_protocol mode because {}, exiting...\r\n", .{status});
             return;
         }
         resolution_x = info.horizontal_resolution;
@@ -82,50 +87,81 @@ pub fn main() void {
     var fs: ?*uefi.protocol.SimpleFileSystem = undefined;
     status = boot_services.locateProtocol(&uefi.protocol.SimpleFileSystem.guid, null, @ptrCast(&fs));
     if (status != uefi.Status.Success) {
-        printf(buf[0..], "*** file system protocol not supported because {}!\r\n", .{status});
+        print("*** file system protocol not supported because {}!\r\n", .{status});
         return;
     }
-    var f: *uefi.protocol.File = undefined;
-    status = fs.?.openVolume(&f);
+    status = fs.?.openVolume(&volume);
     if (status != uefi.Status.Success) {
-        printf(buf[0..], "open volume failed because {}", .{status});
+        print("open volume failed because {}", .{status});
         return;
     }
-    var wallpaper: *uefi.protocol.File = undefined;
-    status = f.open(&wallpaper, unicode.utf8ToUtf16LeStringLiteral("efi\\boot\\wallpaper.bmp"), uefi.protocol.File.efi_file_mode_read, uefi.protocol.File.efi_file_valid_attr);
-    if (status != uefi.Status.Success) {
-        printf(buf[0..], "failed to open wallpaper because {}", .{status});
-        return;
-    }
-    const wallpaper_buf_size: usize = 7 * 1024 * 1024;
-    const wallpaper_buf: []u8 = uefi.pool_allocator.alloc(u8, wallpaper_buf_size) catch |err| {
-        printf(buf[0..], "failed to alloc wallpaper buffer because {}", .{err});
+
+    const wallpaper_size: usize = 7 * 1024 * 1024;
+    const wallpaper: []u8 = uefi.pool_allocator.alloc(u8, wallpaper_size) catch |err| {
+        print("failed to alloc wallpaper buffer because {}", .{err});
         return;
     };
-    var size = wallpaper_buf_size;
-    printf(buf[0..], "size of buffer {} \r\n", .{wallpaper_buf.len});
-    status = wallpaper.read(&size, wallpaper_buf.ptr);
-    if (status != uefi.Status.Success) {
-        printf(buf[0..], "failed to read wallpaper because {}", .{status});
-        return;
-    }
-    printf(buf[0..], "size of wallpaper {} size of buffer {}\r\n", .{ size, wallpaper_buf.len });
-    const wp = bmp.parse(uefi.pool_allocator, wallpaper_buf[0..size]) catch |err| {
-        printf(buf[0..], "failed to load image because {}", .{err});
+    defer uefi.pool_allocator.free(wallpaper);
+
+    _ = open_file(wallpaper, "efi\\boot\\wallpaper.bmp") catch |err| {
+        print("failed to open wallpaper image because {}", .{err});
         return;
     };
-    printf(buf[0..], "image pixels {} height {} width {}\r\n", .{ wp.pixels.len, wp.height, wp.width });
-    var blt_buffer = uefi.pool_allocator.alloc(uefi.protocol.GraphicsOutput.BltPixel, resolution_x * resolution_y) catch |err| {
-        printf(buf[0..], "failed to alloc blt buffer because {}", .{err});
+    const wp = bmp.parse(uefi.pool_allocator, wallpaper[0..wallpaper_size]) catch |err| {
+        print("failed to load image because {}", .{err});
         return;
     };
-    scale_nearest_neighbour(wp, &blt_buffer, resolution_x, resolution_y);
+    print("image pixels {} height {} width {}\r\n", .{ wp.pixels.len, wp.height, wp.width });
+    const blt_buffer = uefi.pool_allocator.alloc(uefi.protocol.GraphicsOutput.BltPixel, resolution_x * resolution_y) catch |err| {
+        print("failed to alloc blt buffer because {}", .{err});
+        return;
+    };
+    @memset(blt_buffer, uefi.protocol.GraphicsOutput.BltPixel{ .red = 255, .green = 255, .blue = 255 });
+    // scale_nearest_neighbour(wp, &blt_buffer, resolution_x, resolution_y);
+    const ttf: []u8 = uefi.pool_allocator.alloc(u8, 20 * 1024 * 1024) catch |err| {
+        print("failed to alloc ttf buffer because {}", .{err});
+        return;
+    };
+    defer uefi.pool_allocator.free(ttf);
+    const ttf_size = open_file(ttf, "efi\\boot\\SF-Pro.ttf") catch |err| {
+        print("failed to open font file because {}", .{err});
+        return;
+    };
+    font.ttf_load(uefi.pool_allocator, ttf[0..ttf_size]) catch |err| {
+        print("failed to load font file because {}", .{err});
+        return;
+    };
+    defer font.ttf_unload(uefi.pool_allocator);
     status = graphics_output_protocol.?.blt(blt_buffer.ptr, uefi.protocol.GraphicsOutput.BltOperation.BltBufferToVideo, 0, 0, 0, 0, resolution_x, resolution_y, 0);
     if (status != uefi.Status.Success) {
-        printf(buf[0..], "blt failed because {}", .{status});
+        print("blt failed because {}", .{status});
         return;
     }
+    const draw_buffer = DrawBuffer{ .pixels = blt_buffer, .width = resolution_x, .height = resolution_y };
+    font.draw(draw_buffer);
     while (true) {}
+}
+
+const FileError = error{
+    OpenError,
+    ReadError,
+};
+
+fn open_file(read_buf: []u8, path: []const u8) !usize {
+    var f: *uefi.protocol.File = undefined;
+    const efi_path = try unicode.utf8ToUtf16LeAllocZ(uefi.pool_allocator, path);
+    defer uefi.pool_allocator.free(efi_path);
+    var status = volume.open(&f, efi_path.ptr, uefi.protocol.File.efi_file_mode_read, uefi.protocol.File.efi_file_valid_attr);
+    if (status != uefi.Status.Success) {
+        return FileError.OpenError;
+    }
+    var size = read_buf.len;
+    status = f.read(&size, read_buf.ptr);
+    if (status != uefi.Status.Success) {
+        return FileError.ReadError;
+    }
+    print("size of file {}\r\n", .{size});
+    return size;
 }
 
 pub fn scale_nearest_neighbour(image: bmp.Image, target_buf: *[]uefi.protocol.GraphicsOutput.BltPixel, target_x: usize, target_y: usize) void {
@@ -145,3 +181,27 @@ pub fn scale_nearest_neighbour(image: bmp.Image, target_buf: *[]uefi.protocol.Gr
         }
     }
 }
+
+pub const Color = struct {
+    r: u8,
+    g: u8,
+    b: u8,
+};
+
+pub const DrawBuffer = struct {
+    height: usize,
+    width: usize,
+    pixels: []uefi.protocol.GraphicsOutput.BltPixel,
+
+    pub fn blit(self: DrawBuffer, x: u16, y: u16, color: Color) void {
+        std.debug.assert(y < self.height);
+        self.pixels[y * self.width + x].red = color.r;
+        self.pixels[y * self.width + x].green = color.g;
+        self.pixels[y * self.width + x].blue = color.b;
+        const status = graphics_output_protocol.?.blt(self.pixels.ptr, uefi.protocol.GraphicsOutput.BltOperation.BltBufferToVideo, 0, 0, 0, 0, resolution_x, resolution_y, 0);
+        if (status != uefi.Status.Success) {
+            print("blt failed because {}", .{status});
+            return;
+        }
+    }
+};

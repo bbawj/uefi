@@ -45,6 +45,8 @@ pub fn build(b: *std.Build) void {
         "virtio-rng-pci",
         "-net",
         "none",
+        "-m",
+        "1G",
     });
     run_cmd.step.dependOn(b.getInstallStep());
 
