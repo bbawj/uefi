@@ -138,7 +138,7 @@ pub fn main() void {
         return;
     }
     const draw_buffer = DrawBuffer{ .pixels = blt_buffer, .width = resolution_x, .height = resolution_y };
-    font.draw(draw_buffer);
+    font.draw('A', draw_buffer);
     while (true) {}
 }
 
@@ -193,11 +193,14 @@ pub const DrawBuffer = struct {
     width: usize,
     pixels: []uefi.protocol.GraphicsOutput.BltPixel,
 
-    pub fn blit(self: DrawBuffer, x: u16, y: u16, color: Color) void {
+    pub fn put_pixel(self: DrawBuffer, x: u16, y: u16, color: Color) void {
         std.debug.assert(y < self.height);
         self.pixels[y * self.width + x].red = color.r;
         self.pixels[y * self.width + x].green = color.g;
         self.pixels[y * self.width + x].blue = color.b;
+    }
+
+    pub fn blit(self: DrawBuffer) void {
         const status = graphics_output_protocol.?.blt(self.pixels.ptr, uefi.protocol.GraphicsOutput.BltOperation.BltBufferToVideo, 0, 0, 0, 0, resolution_x, resolution_y, 0);
         if (status != uefi.Status.Success) {
             print("blt failed because {}", .{status});

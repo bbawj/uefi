@@ -20,6 +20,7 @@ var MAXP: Maxp = undefined;
 var records: []TableRecord = undefined;
 var glyphs: []Glyph = undefined;
 var locs: []u32 = undefined;
+var CMAP: std.hash_map.AutoHashMap(u8, u16) = undefined;
 
 pub fn ttf_load(allocator: Allocator, bytes: []const u8) !void {
     const num_tables = std.mem.readInt(u16, bytes[4..6], Endian.big);
@@ -46,11 +47,81 @@ pub fn ttf_load(allocator: Allocator, bytes: []const u8) !void {
             print("maxp: {}\n", .{MAXP});
         }
     }
+    // var cmap = std.hash_map.AutoHashMap(u8, u16);
+    CMAP = std.hash_map.AutoHashMap(u8, u16).init(allocator);
+    cmap_parse(bytes);
+    print("{}\n", .{CMAP.get('H').?});
     locs = try allocator.alloc(u32, MAXP.num_glyphs);
-    try loca(HEAD.index_to_loc_format, bytes[find_record(num_tables, "loca").?.offset..]);
+    try loca(HEAD.index_to_loc_format, bytes[find_record("loca").?.offset..]);
     print("locs length: {}\n", .{locs.len});
     glyphs = try allocator.alloc(Glyph, MAXP.num_glyphs);
-    try glyf(allocator, bytes[find_record(num_tables, "glyf").?.offset..]);
+    try glyf(allocator, bytes[find_record("glyf").?.offset..]);
+}
+
+const Reader = struct {
+    bytes: []const u8,
+
+    var idx: u32 = 0;
+
+    pub fn readType(self: Reader, comptime t: type) t {
+        const ret = std.mem.readInt(t, self.bytes[idx .. idx + @sizeOf(t)][0..@sizeOf(t)], Endian.big);
+        idx += @sizeOf(t);
+        return ret;
+    }
+
+    pub fn skipBytes(self: Reader, comptime skip: u32) void {
+        _ = self;
+        idx += skip;
+    }
+
+    pub fn seekTo(self: Reader, offset: u32) void {
+        _ = self;
+        idx = offset;
+    }
+};
+
+fn cmap_parse(bytes: []const u8) void {
+    const cmap = find_record("cmap");
+    const reader = Reader{ .bytes = bytes[cmap.?.offset..] };
+    assert(reader.readType(u16) == 0);
+    const num_subtables = reader.readType(u16);
+
+    // just use the first one, expecting unicode platform
+    for (0..num_subtables) |_| {
+        const platform_id = reader.readType(u16);
+        if (platform_id != 0) {
+            reader.skipBytes(@sizeOf(u16) + @sizeOf(u32));
+            continue;
+        }
+        const encoding_id = reader.readType(u16);
+        if (encoding_id != 3 and encoding_id != 4) {
+            print("encoding: {}\n", .{encoding_id});
+            reader.skipBytes(@sizeOf(u32));
+            continue;
+        }
+
+        // only support Unicode format 12
+        const offset = reader.readType(u32);
+        reader.seekTo(offset);
+        const format = reader.readType(u16);
+        print("format: {}\n", .{format});
+
+        reader.skipBytes(@sizeOf(u16) + @sizeOf(u32) * 2);
+        const num_grps = reader.readType(u32);
+
+        // support only basic ASCII
+        for (0..num_grps) |_| {
+            const start_code = reader.readType(u32);
+            _ = reader.readType(u32);
+            const glyph_id = reader.readType(u32);
+            CMAP.put(@intCast(start_code), @intCast(glyph_id)) catch unreachable;
+            // print("{} {} {}\n", .{ start_code, end_code, glyph_id });
+            if (start_code > 1 << 7) break;
+        }
+
+        return;
+    }
+    unreachable;
 }
 
 pub fn ttf_unload(allocator: Allocator) void {
@@ -69,35 +140,47 @@ pub fn ttf_unload(allocator: Allocator) void {
     allocator.free(locs);
     allocator.free(records);
     allocator.free(glyphs);
+    CMAP.deinit();
 }
 
-pub fn draw(target_buf: DrawBuffer) void {
-    const g = glyphs[0];
-    const font_size = 12;
+pub fn draw(char: u8, target_buf: DrawBuffer) void {
+    const g = glyphs[CMAP.get(char).?];
+    print("glyph: {}\n", .{g});
+    print("glyph: {}\n", .{g.data.simple});
+    const font_size = 50;
     const ppi = 227;
     const ppem = font_size * ppi / 72;
 
     switch (g.data) {
         .simple => |d| {
-            for (1..d.coords.len) |c| {
-                const p1 = d.coords[c - 1];
-                const p2 = d.coords[c];
+            for (1..d.coords.len + 1) |c| {
+                var p1: Coord = undefined;
+                var p2: Coord = undefined;
+                if (c == d.coords.len) {
+                    p1 = d.coords[c - 1];
+                    p2 = d.coords[0];
+                } else {
+                    p1 = d.coords[c - 1];
+                    p2 = d.coords[c];
+                }
 
                 const from_x = @as(u32, @intCast(p1.x)) * ppem / HEAD.units_per_em;
                 const from_y = @as(u32, @intCast(p1.y)) * ppem / HEAD.units_per_em;
                 const to_x = @as(u32, @intCast(p2.x)) * ppem / HEAD.units_per_em;
                 const to_y = @as(u32, @intCast(p2.y)) * ppem / HEAD.units_per_em;
                 print("going from {},{} to {},{}\r\n", .{ from_x, from_y, to_x, to_y });
-                const dx: i64 = @as(i64, @intCast(to_x)) - @as(i64, @intCast(from_x));
-                const dy: i64 = @as(i64, @intCast(to_y)) - @as(i64, @intCast(from_y));
+                var dx: i64 = @as(i64, @intCast(to_x)) - @as(i64, @intCast(from_x));
+                var dy: i64 = @as(i64, @intCast(to_y)) - @as(i64, @intCast(from_y));
                 const pixel_dx: i8 = if (dx > 0) 1 else -1;
                 const pixel_dy: i8 = if (dy > 0) 1 else -1;
-                var D: i64 = 2 * dy - dx;
+                if (pixel_dx < 0) dx = -dx;
+                if (pixel_dy < 0) dy = -dy;
                 var cursor_x: i64 = from_x;
                 var cursor_y: i64 = from_y;
                 if (@abs(dx) >= @abs(dy)) {
+                    var D: i64 = 2 * dy - dx;
                     while (cursor_x != to_x) {
-                        target_buf.blit(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
+                        target_buf.put_pixel(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
                         cursor_x += pixel_dx;
                         if (cursor_y != to_y) {
                             if (D > 0) {
@@ -109,15 +192,16 @@ pub fn draw(target_buf: DrawBuffer) void {
                         }
                     }
                 } else {
+                    var D: i64 = 2 * dx - dy;
                     while (cursor_y != to_y) {
-                        target_buf.blit(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
+                        target_buf.put_pixel(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
                         cursor_y += pixel_dy;
                         if (cursor_x != to_x) {
                             if (D > 0) {
                                 cursor_x += pixel_dx;
-                                D += 2 * dy - 2 * dx;
+                                D += 2 * dx - 2 * dy;
                             } else {
-                                D += 2 * dy;
+                                D += 2 * dx;
                             }
                         }
                     }
@@ -126,10 +210,11 @@ pub fn draw(target_buf: DrawBuffer) void {
         },
         .compound => {},
     }
+    target_buf.blit();
 }
 
-fn find_record(num_tables: usize, tag: []const u8) ?TableRecord {
-    for (0..num_tables) |i| {
+fn find_record(tag: []const u8) ?TableRecord {
+    for (0..records.len) |i| {
         const record = records[i];
         if (std.mem.eql(u8, tag, &record.tag)) {
             return record;
@@ -304,7 +389,7 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
                         if (!isBitSet(flag, y_same_mask)) {
                             const delta = std.mem.readInt(i16, byte_ptr[0..2], Endian.big);
                             if (delta > 0) {
-                                y += @intCast(delta);
+                                y -= @intCast(delta);
                             } else {
                                 y += @intCast(-delta);
                             }
@@ -316,7 +401,6 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
             }
             g.data = data;
         }
-        if (i == 0) print("glyph: {}\n", .{glyphs[i].data.simple});
     }
 }
 
