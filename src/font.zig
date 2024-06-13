@@ -144,6 +144,10 @@ pub fn ttf_unload(allocator: Allocator) void {
 }
 
 pub fn draw(char: u8, target_buf: DrawBuffer) void {
+    if (CMAP.get(char) == null) {
+        print("char {c} is unsupported\n", .{char});
+        return;
+    }
     const g = glyphs[CMAP.get(char).?];
     print("glyph: {}\n", .{g});
     print("glyph: {}\n", .{g.data.simple});
@@ -153,64 +157,71 @@ pub fn draw(char: u8, target_buf: DrawBuffer) void {
 
     switch (g.data) {
         .simple => |d| {
-            for (1..d.coords.len + 1) |c| {
-                var p1: Coord = undefined;
-                var p2: Coord = undefined;
-                if (c == d.coords.len) {
-                    p1 = d.coords[c - 1];
-                    p2 = d.coords[0];
-                } else {
-                    p1 = d.coords[c - 1];
-                    p2 = d.coords[c];
-                }
+            var start_pt: usize = 0;
+            for (d.end_pts_of_contour) |end_pt| {
+                for (start_pt..(end_pt + 1)) |c| {
+                    var p1: Coord = undefined;
+                    var p2: Coord = undefined;
+                    if (c == end_pt) {
+                        p1 = d.coords[c];
+                        p2 = d.coords[start_pt];
+                        print("index from {} to {}\r\n", .{ c, start_pt });
+                    } else {
+                        p1 = d.coords[c];
+                        p2 = d.coords[c + 1];
+                        print("index from {} to {}\r\n", .{ c, c + 1 });
+                    }
 
-                const from_x = @as(u32, @intCast(p1.x)) * ppem / HEAD.units_per_em;
-                const from_y = @as(u32, @intCast(p1.y)) * ppem / HEAD.units_per_em;
-                const to_x = @as(u32, @intCast(p2.x)) * ppem / HEAD.units_per_em;
-                const to_y = @as(u32, @intCast(p2.y)) * ppem / HEAD.units_per_em;
-                print("going from {},{} to {},{}\r\n", .{ from_x, from_y, to_x, to_y });
-                var dx: i64 = @as(i64, @intCast(to_x)) - @as(i64, @intCast(from_x));
-                var dy: i64 = @as(i64, @intCast(to_y)) - @as(i64, @intCast(from_y));
-                const pixel_dx: i8 = if (dx > 0) 1 else -1;
-                const pixel_dy: i8 = if (dy > 0) 1 else -1;
-                if (pixel_dx < 0) dx = -dx;
-                if (pixel_dy < 0) dy = -dy;
-                var cursor_x: i64 = from_x;
-                var cursor_y: i64 = from_y;
-                if (@abs(dx) >= @abs(dy)) {
-                    var D: i64 = 2 * dy - dx;
-                    while (cursor_x != to_x) {
-                        target_buf.put_pixel(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
-                        cursor_x += pixel_dx;
-                        if (cursor_y != to_y) {
-                            if (D > 0) {
-                                cursor_y += pixel_dy;
-                                D += 2 * dy - 2 * dx;
-                            } else {
-                                D += 2 * dy;
+                    const from_x = @as(u32, @intCast(p1.x)) * ppem / HEAD.units_per_em;
+                    const from_y = @as(u32, @intCast(p1.y)) * ppem / HEAD.units_per_em;
+                    const to_x = @as(u32, @intCast(p2.x)) * ppem / HEAD.units_per_em;
+                    const to_y = @as(u32, @intCast(p2.y)) * ppem / HEAD.units_per_em;
+                    print("going from {},{} to {},{}\r\n", .{ from_x, from_y, to_x, to_y });
+                    var dx: i64 = @as(i64, @intCast(to_x)) - @as(i64, @intCast(from_x));
+                    var dy: i64 = @as(i64, @intCast(to_y)) - @as(i64, @intCast(from_y));
+                    const pixel_dx: i8 = if (dx > 0) 1 else -1;
+                    const pixel_dy: i8 = if (dy > 0) 1 else -1;
+                    if (pixel_dx < 0) dx = -dx;
+                    if (pixel_dy < 0) dy = -dy;
+                    var cursor_x: i64 = from_x;
+                    var cursor_y: i64 = from_y;
+                    if (@abs(dx) >= @abs(dy)) {
+                        var D: i64 = 2 * dy - dx;
+                        while (cursor_x != to_x) {
+                            target_buf.put_pixel(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
+                            cursor_x += pixel_dx;
+                            if (cursor_y != to_y) {
+                                if (D > 0) {
+                                    cursor_y += pixel_dy;
+                                    D += 2 * dy - 2 * dx;
+                                } else {
+                                    D += 2 * dy;
+                                }
                             }
+                            target_buf.blit();
                         }
-                    }
-                } else {
-                    var D: i64 = 2 * dx - dy;
-                    while (cursor_y != to_y) {
-                        target_buf.put_pixel(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
-                        cursor_y += pixel_dy;
-                        if (cursor_x != to_x) {
-                            if (D > 0) {
-                                cursor_x += pixel_dx;
-                                D += 2 * dx - 2 * dy;
-                            } else {
-                                D += 2 * dx;
+                    } else {
+                        var D: i64 = 2 * dx - dy;
+                        while (cursor_y != to_y) {
+                            target_buf.put_pixel(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
+                            cursor_y += pixel_dy;
+                            if (cursor_x != to_x) {
+                                if (D > 0) {
+                                    cursor_x += pixel_dx;
+                                    D += 2 * dx - 2 * dy;
+                                } else {
+                                    D += 2 * dx;
+                                }
                             }
+                            target_buf.blit();
                         }
                     }
                 }
+                start_pt = end_pt + 1;
             }
         },
         .compound => {},
     }
-    target_buf.blit();
 }
 
 fn find_record(tag: []const u8) ?TableRecord {
