@@ -112,11 +112,13 @@ fn cmap_parse(bytes: []const u8) void {
         // support only basic ASCII
         for (0..num_grps) |_| {
             const start_code = reader.readType(u32);
-            _ = reader.readType(u32);
-            const glyph_id = reader.readType(u32);
-            CMAP.put(@intCast(start_code), @intCast(glyph_id)) catch unreachable;
-            // print("{} {} {}\n", .{ start_code, end_code, glyph_id });
             if (start_code > 1 << 7) break;
+            const end_code = reader.readType(u32);
+            const glyph_id = reader.readType(u32);
+
+            for (start_code..end_code + 1, 0..) |code, idx| {
+                CMAP.put(@intCast(code), @intCast(glyph_id + idx)) catch unreachable;
+            }
         }
 
         return;
@@ -143,17 +145,35 @@ pub fn ttf_unload(allocator: Allocator) void {
     CMAP.deinit();
 }
 
-pub fn draw(char: u8, target_buf: DrawBuffer) void {
-    if (CMAP.get(char) == null) {
-        print("char {c} is unsupported\n", .{char});
-        return;
+pub fn draw(str: []const u8, target_buf: DrawBuffer) void {
+    const line_spacing = 12.0;
+    const font_size = 50.0;
+    const ppi = 227.0;
+    const ppem: f32 = font_size * ppi / 72.0;
+    const scale: f32 = ppem / @as(f32, @floatFromInt(HEAD.units_per_em));
+    var off_x: isize = 0;
+    var off_y: isize = 0;
+    for (str) |char| {
+        var g: Glyph = undefined;
+        if (CMAP.get(char) == null) {
+            print("char {c} is unsupported\n", .{char});
+            g = glyphs[0];
+        } else {
+            g = glyphs[CMAP.get(char).?];
+        }
+        if (off_x > target_buf.width) {
+            off_x = 0;
+            off_y += @intFromFloat(@round(@as(f32, @floatFromInt(g.y_max)) * scale) + line_spacing);
+        }
+        draw_char(g, target_buf, scale, off_x, off_y);
+        off_x += @intFromFloat(@round(@as(f32, @floatFromInt(g.x_max)) * scale));
     }
-    const g = glyphs[CMAP.get(char).?];
+    target_buf.blit();
+}
+
+pub fn draw_char(g: Glyph, target_buf: DrawBuffer, scale: f32, off_x: isize, off_y: isize) void {
     print("glyph: {}\n", .{g});
     print("glyph: {}\n", .{g.data.simple});
-    const font_size = 50;
-    const ppi = 227;
-    const ppem = font_size * ppi / 72;
 
     switch (g.data) {
         .simple => |d| {
@@ -172,10 +192,10 @@ pub fn draw(char: u8, target_buf: DrawBuffer) void {
                         print("index from {} to {}\r\n", .{ c, c + 1 });
                     }
 
-                    const from_x = @as(u32, @intCast(p1.x)) * ppem / HEAD.units_per_em;
-                    const from_y = @as(u32, @intCast(p1.y)) * ppem / HEAD.units_per_em;
-                    const to_x = @as(u32, @intCast(p2.x)) * ppem / HEAD.units_per_em;
-                    const to_y = @as(u32, @intCast(p2.y)) * ppem / HEAD.units_per_em;
+                    const from_x: i64 = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p1.x)) * scale))) + off_x;
+                    const from_y: i64 = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p1.y)) * scale))) + off_y;
+                    const to_x: i64 = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p2.x)) * scale))) + off_x;
+                    const to_y: i64 = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p2.y)) * scale))) + off_y;
                     print("going from {},{} to {},{}\r\n", .{ from_x, from_y, to_x, to_y });
                     var dx: i64 = @as(i64, @intCast(to_x)) - @as(i64, @intCast(from_x));
                     var dy: i64 = @as(i64, @intCast(to_y)) - @as(i64, @intCast(from_y));
@@ -198,7 +218,7 @@ pub fn draw(char: u8, target_buf: DrawBuffer) void {
                                     D += 2 * dy;
                                 }
                             }
-                            target_buf.blit();
+                            // target_buf.blit();
                         }
                     } else {
                         var D: i64 = 2 * dx - dy;
@@ -213,7 +233,7 @@ pub fn draw(char: u8, target_buf: DrawBuffer) void {
                                     D += 2 * dx;
                                 }
                             }
-                            target_buf.blit();
+                            // target_buf.blit();
                         }
                     }
                 }
@@ -410,6 +430,8 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
                     coords[j].y = y;
                 }
             }
+            g.x_max -= g.x_min;
+            g.y_max = g.y_max - g.y_min;
             g.data = data;
         }
     }

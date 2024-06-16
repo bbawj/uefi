@@ -25,7 +25,7 @@ fn puts(msg: []const u8) void {
     }
 }
 
-var print_buf: [1024]u8 = undefined;
+var print_buf: [10 * 1024]u8 = undefined;
 
 pub fn print(comptime format: []const u8, args: anytype) void {
     if (builtin.os.tag == .uefi) {
@@ -138,8 +138,33 @@ pub fn main() void {
         return;
     }
     const draw_buffer = DrawBuffer{ .pixels = blt_buffer, .width = resolution_x, .height = resolution_y };
-    font.draw('A', draw_buffer);
-    while (true) {}
+    font.draw("ABCDEFGHIJKLMNOPQRSTUVWXYZ", draw_buffer);
+
+    // Create an array of input events.
+    const input_events = [_]uefi.Event{
+        uefi.system_table.con_in.?.wait_for_key,
+    };
+    // TODO add more input events
+
+    var index: usize = undefined;
+    // Wait for input events.
+    while (boot_services.waitForEvent(input_events.len, &input_events, &index) == uefi.Status.Success) {
+        // index tells us which event has been signalled.
+
+        // Key event
+        if (index == 0) {
+            var input_key: uefi.protocol.SimpleTextInput.Key.Input = undefined;
+            if (uefi.system_table.con_in.?.readKeyStroke(&input_key) == uefi.Status.Success) {
+                switch (input_key.scan_code) {
+                    1 => {
+                        draw_buffer.reset();
+                        font.draw("B", draw_buffer);
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
 }
 
 const FileError = error{
@@ -194,7 +219,7 @@ pub const DrawBuffer = struct {
     pixels: []uefi.protocol.GraphicsOutput.BltPixel,
 
     pub fn put_pixel(self: DrawBuffer, x: u16, y: u16, color: Color) void {
-        std.debug.assert(y < self.height);
+        if (y >= self.height or x >= self.width) return;
         self.pixels[y * self.width + x].red = color.r;
         self.pixels[y * self.width + x].green = color.g;
         self.pixels[y * self.width + x].blue = color.b;
@@ -206,5 +231,9 @@ pub const DrawBuffer = struct {
             print("blt failed because {}", .{status});
             return;
         }
+    }
+
+    pub fn reset(self: DrawBuffer) void {
+        @memset(self.pixels, uefi.protocol.GraphicsOutput.BltPixel{ .red = 255, .green = 255, .blue = 255 });
     }
 };
