@@ -178,69 +178,101 @@ pub fn draw_char(g: Glyph, target_buf: DrawBuffer, scale: f32, off_x: isize, off
     switch (g.data) {
         .simple => |d| {
             var start_pt: usize = 0;
+            var i: usize = 0;
             for (d.end_pts_of_contour) |end_pt| {
-                for (start_pt..(end_pt + 1)) |c| {
-                    var p1: Coord = undefined;
-                    var p2: Coord = undefined;
-                    if (c == end_pt) {
-                        p1 = d.coords[c];
-                        p2 = d.coords[start_pt];
-                        print("index from {} to {}\r\n", .{ c, start_pt });
+                while (i < end_pt) : (i += 2) {
+                    const p1 = d.coords[i];
+                    const p2 = d.coords[i + 1];
+                    var p3: Coord = undefined;
+                    if (i == end_pt - 1) {
+                        // TODO: we added new pts so the start_pt has to change
+                        p3 = d.coords[start_pt];
                     } else {
-                        p1 = d.coords[c];
-                        p2 = d.coords[c + 1];
-                        print("index from {} to {}\r\n", .{ c, c + 1 });
+                        p3 = d.coords[i + 2];
                     }
 
-                    const from_x: i64 = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p1.x)) * scale))) + off_x;
-                    const from_y: i64 = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p1.y)) * scale))) + off_y;
-                    const to_x: i64 = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p2.x)) * scale))) + off_x;
-                    const to_y: i64 = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p2.y)) * scale))) + off_y;
-                    print("going from {},{} to {},{}\r\n", .{ from_x, from_y, to_x, to_y });
-                    var dx: i64 = @as(i64, @intCast(to_x)) - @as(i64, @intCast(from_x));
-                    var dy: i64 = @as(i64, @intCast(to_y)) - @as(i64, @intCast(from_y));
-                    const pixel_dx: i8 = if (dx > 0) 1 else -1;
-                    const pixel_dy: i8 = if (dy > 0) 1 else -1;
-                    if (pixel_dx < 0) dx = -dx;
-                    if (pixel_dy < 0) dy = -dy;
-                    var cursor_x: i64 = from_x;
-                    var cursor_y: i64 = from_y;
-                    if (@abs(dx) >= @abs(dy)) {
-                        var D: i64 = 2 * dy - dx;
-                        while (cursor_x != to_x) {
-                            target_buf.put_pixel(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
-                            cursor_x += pixel_dx;
-                            if (cursor_y != to_y) {
-                                if (D > 0) {
-                                    cursor_y += pixel_dy;
-                                    D += 2 * dy - 2 * dx;
-                                } else {
-                                    D += 2 * dy;
-                                }
-                            }
-                            // target_buf.blit();
-                        }
-                    } else {
-                        var D: i64 = 2 * dx - dy;
-                        while (cursor_y != to_y) {
-                            target_buf.put_pixel(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
-                            cursor_y += pixel_dy;
-                            if (cursor_x != to_x) {
-                                if (D > 0) {
-                                    cursor_x += pixel_dx;
-                                    D += 2 * dx - 2 * dy;
-                                } else {
-                                    D += 2 * dx;
-                                }
-                            }
-                            // target_buf.blit();
-                        }
-                    }
+                    const from = Vec2{
+                        .x = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p1.x)) * scale))) + off_x,
+                        .y = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p1.y)) * scale))) + off_y,
+                    };
+                    const mid = Vec2{
+                        .x = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p2.x)) * scale))) + off_x,
+                        .y = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p2.y)) * scale))) + off_y,
+                    };
+                    const to = Vec2{
+                        .x = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p3.x)) * scale))) + off_x,
+                        .y = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p3.y)) * scale))) + off_y,
+                    };
+                    // print("going from {},{} to {},{}\r\n", .{ from.x, from.y, to.x, to.y });
+                    draw_curve(target_buf, from, mid, to);
                 }
                 start_pt = end_pt + 1;
             }
         },
         .compound => {},
+    }
+}
+
+fn bresenham_line(target_buf: DrawBuffer, from: Vec2, to: Vec2) void {
+    var dx: i64 = to.x - from.x;
+    var dy: i64 = to.y - from.y;
+    const pixel_dx: i8 = if (dx > 0) 1 else -1;
+    const pixel_dy: i8 = if (dy > 0) 1 else -1;
+    if (pixel_dx < 0) dx = -dx;
+    if (pixel_dy < 0) dy = -dy;
+    var cursor_x: i64 = from.x;
+    var cursor_y: i64 = from.y;
+    if (@abs(dx) >= @abs(dy)) {
+        var D: i64 = 2 * dy - dx;
+        while (cursor_x != to.x) {
+            target_buf.put_pixel(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
+            cursor_x += pixel_dx;
+            if (cursor_y != to.y) {
+                if (D > 0) {
+                    cursor_y += pixel_dy;
+                    D += 2 * dy - 2 * dx;
+                } else {
+                    D += 2 * dy;
+                }
+            }
+            // target_buf.blit();
+        }
+    } else {
+        var D: i64 = 2 * dx - dy;
+        while (cursor_y != to.y) {
+            target_buf.put_pixel(@intCast(cursor_x), @intCast(cursor_y), Color{ .r = 255, .g = 0, .b = 0 });
+            cursor_y += pixel_dy;
+            if (cursor_x != to.x) {
+                if (D > 0) {
+                    cursor_x += pixel_dx;
+                    D += 2 * dx - 2 * dy;
+                } else {
+                    D += 2 * dx;
+                }
+            }
+            // target_buf.blit();
+        }
+    }
+}
+
+fn lerp(p1: Vec2, p2: Vec2, t: f64) Vec2 {
+    return add(p1, mult(sub(p2, p1), t));
+}
+
+fn bezier_interp(p1: Vec2, p2: Vec2, p3: Vec2, t: f64) Vec2 {
+    const interA = lerp(p1, p2, t);
+    const interB = lerp(p2, p3, t);
+    return lerp(interA, interB, t);
+}
+
+fn draw_curve(target_buf: DrawBuffer, p1: Vec2, p2: Vec2, p3: Vec2) void {
+    const res = 2;
+    var prev = bezier_interp(p1, p2, p3, 0);
+    for (0..res) |i| {
+        const t = (1.0 + @as(f32, @floatFromInt(i))) / res;
+        const cur = bezier_interp(p1, p2, p3, t);
+        bresenham_line(target_buf, prev, cur);
+        prev = cur;
     }
 }
 
@@ -284,7 +316,25 @@ const SimpleData = struct {
 const Coord = struct {
     x: u16,
     y: u16,
+    on_curve: bool,
 };
+
+const Vec2 = struct {
+    x: i64,
+    y: i64,
+};
+
+pub fn add(one: Vec2, other: Vec2) Vec2 {
+    return Vec2{ .x = one.x + other.x, .y = one.y + other.y };
+}
+
+pub fn sub(one: Vec2, other: Vec2) Vec2 {
+    return Vec2{ .x = one.x - other.x, .y = one.y - other.y };
+}
+
+pub fn mult(v: Vec2, s: f64) Vec2 {
+    return Vec2{ .x = @intFromFloat(@as(f64, @floatFromInt(v.x)) * s), .y = @intFromFloat(@as(f64, @floatFromInt(v.y)) * s) };
+}
 
 const GlyphData = union(GlyphDataKind) {
     simple: SimpleData,
@@ -332,6 +382,7 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
             var flags = try allocator.alloc(u8, @intCast(num_points));
             data.simple.flags = flags;
 
+            const on_curve_mask = 0;
             const x_short_mask = 1;
             const y_short_mask = 2;
             const repeat_mask = 3;
@@ -354,13 +405,15 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
                 }
             }
 
-            var coords = try allocator.alloc(Coord, @intCast(num_points));
-            data.simple.coords = coords;
+            var coords = try std.ArrayList(Coord).initCapacity(allocator, @intCast(num_points));
             for (0..num_points) |j| {
+                var coord: Coord = undefined;
                 const flag = flags[j];
+                coord.on_curve = isBitSet(flag, on_curve_mask);
+
                 var x: i16 = 0;
                 if (j != 0) {
-                    x = @intCast(coords[j - 1].x);
+                    x = @intCast(coords.items[j - 1].x);
                 }
 
                 if (isBitSet(flag, x_short_mask)) {
@@ -379,7 +432,8 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
                 // scale x to start from 0
                 if (j == 0)
                     x -= g.x_min;
-                coords[j].x = @intCast(x);
+                coord.x = @intCast(x);
+                coords.appendAssumeCapacity(coord);
             }
 
             for (0..num_points) |j| {
@@ -404,11 +458,11 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
                     y -= g.y_min;
                     // flip y since in our coordinate system y increases downwards
                     y = -y + (g.y_max - g.y_min);
-                    coords[j].y = @intCast(y);
+                    coords.items[j].y = @intCast(y);
                 } else {
                     // all coordinates are relative from the first one
                     // deltas are now flipped
-                    var y = coords[j - 1].y;
+                    var y = coords.items[j - 1].y;
                     if (isBitSet(flag, y_short_mask)) {
                         if (isBitSet(flag, y_same_mask)) {
                             y -= byte_ptr[0];
@@ -427,11 +481,41 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
                             byte_ptr += 2;
                         }
                     }
-                    coords[j].y = y;
+                    coords.items[j].y = y;
                 }
+            }
+            var k: usize = 0;
+            var inserted: u16 = 0;
+            for (data.simple.end_pts_of_contour, 0..) |end_pt, j| {
+                const start_pt: usize = if (j == 0) 0 else data.simple.end_pts_of_contour[j - 1] + 1;
+                while (k <= end_pt + inserted) : (k += 1) {
+                    // implied mid point between these 2 coords is on curve
+                    const p1 = coords.items[k];
+                    var p2: Coord = undefined;
+                    if (k == end_pt + inserted) {
+                        p2 = coords.items[start_pt];
+                    } else {
+                        p2 = coords.items[k + 1];
+                    }
+                    if (!p1.on_curve and !p2.on_curve) {
+                        const mid = Coord{ .x = (p1.x + p2.x) / 2, .y = (p1.y + p2.y) / 2, .on_curve = true };
+                        try coords.insert(k + 1, mid);
+                        k += 1;
+                        inserted += 1;
+                    } else if (p1.on_curve and p2.on_curve) {
+                        // consecutive on_curve represents a straight line, add implied off curve mid point to turn it into a bezier as well for ease
+                        const mid = Coord{ .x = (p1.x + p2.x) / 2, .y = (p1.y + p2.y) / 2, .on_curve = false };
+                        try coords.insert(k + 1, mid);
+                        k += 1;
+                        inserted += 1;
+                    }
+                }
+                data.simple.end_pts_of_contour[j] += inserted;
             }
             g.x_max -= g.x_min;
             g.y_max = g.y_max - g.y_min;
+            // if (i == CMAP.get('B').?) print("{}\r\n", .{coords});
+            data.simple.coords = try coords.toOwnedSlice();
             g.data = data;
         }
     }

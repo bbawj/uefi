@@ -131,6 +131,7 @@ pub fn main() void {
         print("failed to load font file because {}", .{err});
         return;
     };
+    print("font file loaded!\r\n", .{});
     defer font.ttf_unload(uefi.pool_allocator);
     status = graphics_output_protocol.?.blt(blt_buffer.ptr, uefi.protocol.GraphicsOutput.BltOperation.BltBufferToVideo, 0, 0, 0, 0, resolution_x, resolution_y, 0);
     if (status != uefi.Status.Success) {
