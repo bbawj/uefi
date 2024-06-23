@@ -146,11 +146,7 @@ pub fn ttf_unload(allocator: Allocator) void {
 }
 
 pub fn draw(str: []const u8, target_buf: DrawBuffer) void {
-    const line_spacing = 12.0;
-    const font_size = 50.0;
-    const ppi = 227.0;
-    const ppem: f32 = font_size * ppi / 72.0;
-    const scale: f32 = ppem / @as(f32, @floatFromInt(HEAD.units_per_em));
+    const line_spacing = 12;
     var off_x: isize = 0;
     var off_y: isize = 0;
     for (str) |char| {
@@ -163,15 +159,15 @@ pub fn draw(str: []const u8, target_buf: DrawBuffer) void {
         }
         if (off_x > target_buf.width) {
             off_x = 0;
-            off_y += @intFromFloat(@round(@as(f32, @floatFromInt(g.y_max)) * scale) + line_spacing);
+            off_y += scale_funits_to_pixels(g.y_max) + line_spacing;
         }
-        draw_char(g, target_buf, scale, off_x, off_y);
-        off_x += @intFromFloat(@round(@as(f32, @floatFromInt(g.x_max)) * scale));
+        draw_char(g, target_buf, off_x, off_y);
+        off_x += scale_funits_to_pixels(g.x_max);
     }
     target_buf.blit();
 }
 
-pub fn draw_char(g: Glyph, target_buf: DrawBuffer, scale: f32, off_x: isize, off_y: isize) void {
+pub fn draw_char(g: Glyph, target_buf: DrawBuffer, off_x: isize, off_y: isize) void {
     print("glyph: {}\n", .{g});
     print("glyph: {}\n", .{g.data.simple});
 
@@ -185,23 +181,22 @@ pub fn draw_char(g: Glyph, target_buf: DrawBuffer, scale: f32, off_x: isize, off
                     const p2 = d.coords[i + 1];
                     var p3: Coord = undefined;
                     if (i == end_pt - 1) {
-                        // TODO: we added new pts so the start_pt has to change
                         p3 = d.coords[start_pt];
                     } else {
                         p3 = d.coords[i + 2];
                     }
 
                     const from = Vec2{
-                        .x = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p1.x)) * scale))) + off_x,
-                        .y = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p1.y)) * scale))) + off_y,
+                        .x = scale_funits_to_pixels(p1.x) + off_x,
+                        .y = scale_funits_to_pixels(p1.y) + off_y,
                     };
                     const mid = Vec2{
-                        .x = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p2.x)) * scale))) + off_x,
-                        .y = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p2.y)) * scale))) + off_y,
+                        .x = scale_funits_to_pixels(p2.x) + off_x,
+                        .y = scale_funits_to_pixels(p2.y) + off_y,
                     };
                     const to = Vec2{
-                        .x = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p3.x)) * scale))) + off_x,
-                        .y = @as(i64, @intFromFloat(@round(@as(f32, @floatFromInt(p3.y)) * scale))) + off_y,
+                        .x = scale_funits_to_pixels(p3.x) + off_x,
+                        .y = scale_funits_to_pixels(p3.y) + off_y,
                     };
                     // print("going from {},{} to {},{}\r\n", .{ from.x, from.y, to.x, to.y });
                     draw_curve(target_buf, from, mid, to);
@@ -211,6 +206,87 @@ pub fn draw_char(g: Glyph, target_buf: DrawBuffer, scale: f32, off_x: isize, off
         },
         .compound => {},
     }
+    for (@intCast(off_x)..@intCast(off_x + scale_funits_to_pixels(g.x_max) + 1)) |x| {
+        for (@intCast(off_y)..@intCast(off_y + scale_funits_to_pixels(g.y_max) + 1)) |y| {
+            switch (g.data) {
+                .simple => |d| {
+                    var start_pt: usize = 0;
+                    var i: usize = 0;
+                    for (d.end_pts_of_contour) |end_pt| {
+                        var intersections: usize = 0;
+                        while (i < end_pt) : (i += 2) {
+                            const p1 = d.coords[i];
+                            const p2 = d.coords[i + 1];
+                            var p3: Coord = undefined;
+                            if (i == end_pt - 1) {
+                                p3 = d.coords[start_pt];
+                            } else {
+                                p3 = d.coords[i + 2];
+                            }
+
+                            const from = Vec2{
+                                .x = scale_funits_to_pixels(p1.x) + off_x,
+                                .y = scale_funits_to_pixels(p1.y) + off_y,
+                            };
+                            const mid = Vec2{
+                                .x = scale_funits_to_pixels(p2.x) + off_x,
+                                .y = scale_funits_to_pixels(p2.y) + off_y,
+                            };
+                            const to = Vec2{
+                                .x = scale_funits_to_pixels(p3.x) + off_x,
+                                .y = scale_funits_to_pixels(p3.y) + off_y,
+                            };
+
+                            intersections += ray_intersections(from, mid, to, x, y);
+                        }
+                        start_pt = end_pt + 1;
+                        if (intersections % 2 == 1) {
+                            target_buf.put_pixel(@intCast(x), @intCast(y), Color{ .r = 255, .g = 0, .b = 0 });
+                            // target_buf.blit();
+                        }
+                    }
+                },
+                .compound => {},
+            }
+        }
+    }
+}
+
+fn scale_funits_to_pixels(val: isize) i64 {
+    const font_size = 50.0;
+    const ppi = 227.0;
+    const ppem: f32 = font_size * ppi / 72.0;
+    const scale: f32 = ppem / @as(f32, @floatFromInt(HEAD.units_per_em));
+    return @intFromFloat(@round(@as(f32, @floatFromInt(val)) * scale));
+}
+
+fn ray_intersections(p1: Vec2, p2: Vec2, p3: Vec2, ray_origin_x: usize, y_shift: usize) usize {
+    // the equation of a bezier curve is (p1 - 2p2 + p3)t^2 + 2t(p2-p1) + p1
+    // we want to test how many intersections a horizontal line at y_shift makes with this curve
+    // what value of t will make the resulting bezier point 0
+    // only care about y component as we want to know what t causes y to be 0
+    const a: f32 = @floatFromInt(p1.sub(p2.mult(2)).add(p3).y);
+    const b: f32 = @floatFromInt(p2.sub(p1).mult(2).y);
+    const c: f32 = @floatFromInt(p1.y - @as(isize, @intCast(y_shift)));
+
+    var intersections: usize = 0;
+    if (a == 0) {
+        const t = -c / b;
+        if (is_valid_intersection(t, p1, p2, p3, ray_origin_x)) intersections += 1;
+    } else {
+        // quadratic formula
+        const temp = @sqrt(b * b - 4 * a * c);
+        const t_plus = (-b + temp) / (2 * a);
+        const t_minus = (-b - temp) / (2 * a);
+        // only care about values between 0 and 1 since we only interpolate between these
+        if (is_valid_intersection(t_plus, p1, p2, p3, ray_origin_x)) intersections += 1;
+        if (is_valid_intersection(t_minus, p1, p2, p3, ray_origin_x)) intersections += 1;
+    }
+    return intersections;
+}
+
+fn is_valid_intersection(t: f32, p1: Vec2, p2: Vec2, p3: Vec2, ray_origin_x: usize) bool {
+    return t >= 0 and t < 1 and bezier_interp(p1, p2, p3, t).x >= ray_origin_x;
 }
 
 fn bresenham_line(target_buf: DrawBuffer, from: Vec2, to: Vec2) void {
@@ -256,7 +332,7 @@ fn bresenham_line(target_buf: DrawBuffer, from: Vec2, to: Vec2) void {
 }
 
 fn lerp(p1: Vec2, p2: Vec2, t: f64) Vec2 {
-    return add(p1, mult(sub(p2, p1), t));
+    return p1.add(p2.sub(p1).mult(t));
 }
 
 fn bezier_interp(p1: Vec2, p2: Vec2, p3: Vec2, t: f64) Vec2 {
@@ -322,19 +398,19 @@ const Coord = struct {
 const Vec2 = struct {
     x: i64,
     y: i64,
+
+    pub fn add(self: Vec2, other: Vec2) Vec2 {
+        return Vec2{ .x = self.x + other.x, .y = self.y + other.y };
+    }
+
+    pub fn sub(self: Vec2, other: Vec2) Vec2 {
+        return Vec2{ .x = self.x - other.x, .y = self.y - other.y };
+    }
+
+    pub fn mult(self: Vec2, s: f64) Vec2 {
+        return Vec2{ .x = @intFromFloat(@as(f64, @floatFromInt(self.x)) * s), .y = @intFromFloat(@as(f64, @floatFromInt(self.y)) * s) };
+    }
 };
-
-pub fn add(one: Vec2, other: Vec2) Vec2 {
-    return Vec2{ .x = one.x + other.x, .y = one.y + other.y };
-}
-
-pub fn sub(one: Vec2, other: Vec2) Vec2 {
-    return Vec2{ .x = one.x - other.x, .y = one.y - other.y };
-}
-
-pub fn mult(v: Vec2, s: f64) Vec2 {
-    return Vec2{ .x = @intFromFloat(@as(f64, @floatFromInt(v.x)) * s), .y = @intFromFloat(@as(f64, @floatFromInt(v.y)) * s) };
-}
 
 const GlyphData = union(GlyphDataKind) {
     simple: SimpleData,
@@ -484,6 +560,7 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
                     coords.items[j].y = y;
                 }
             }
+            // Insert a bunch of intermediary points to turn everything into a bezier
             var k: usize = 0;
             var inserted: u16 = 0;
             for (data.simple.end_pts_of_contour, 0..) |end_pt, j| {
@@ -512,7 +589,9 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
                 }
                 data.simple.end_pts_of_contour[j] += inserted;
             }
+            g.x_min = 0;
             g.x_max -= g.x_min;
+            g.y_min = 0;
             g.y_max = g.y_max - g.y_min;
             // if (i == CMAP.get('B').?) print("{}\r\n", .{coords});
             data.simple.coords = try coords.toOwnedSlice();
