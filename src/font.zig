@@ -63,13 +63,23 @@ const Reader = struct {
 
     var idx: u32 = 0;
 
+    pub fn curLoc(self: Reader, comptime t: type) [*]t {
+        return @ptrCast(@constCast(&self.bytes[idx..]));
+    }
+
+    pub fn readSlice(self: Reader, comptime t: type, size: u32) []t {
+        const ret = @as([*]t, @alignCast(@ptrCast(@constCast(self.bytes[idx..].ptr))))[0..size];
+        self.skipBytes(size * @sizeOf(t));
+        return ret;
+    }
+
     pub fn readType(self: Reader, comptime t: type) t {
         const ret = std.mem.readInt(t, self.bytes[idx .. idx + @sizeOf(t)][0..@sizeOf(t)], Endian.big);
         idx += @sizeOf(t);
         return ret;
     }
 
-    pub fn skipBytes(self: Reader, comptime skip: u32) void {
+    pub fn skipBytes(self: Reader, skip: u32) void {
         _ = self;
         idx += skip;
     }
@@ -106,19 +116,60 @@ fn cmap_parse(bytes: []const u8) void {
         const format = reader.readType(u16);
         print("format: {}\n", .{format});
 
-        reader.skipBytes(@sizeOf(u16) + @sizeOf(u32) * 2);
-        const num_grps = reader.readType(u32);
+        switch (format) {
+            4 => {
+                reader.skipBytes(@sizeOf(u16) * 2);
+                const segcount = reader.readType(u16) / 2;
+                reader.skipBytes(@sizeOf(u16) * 3);
+                const end_codes: []u16 = reader.readSlice(u16, segcount);
+                assert(0xFFFF == end_codes[segcount - 1]);
+                assert(0 == reader.readType(u16));
+                const start_codes = reader.readSlice(u16, segcount);
+                const id_deltas = reader.readSlice(u16, segcount);
+                const id_range_start = reader.curLoc(u16);
+                const id_range = reader.readSlice(u16, segcount);
+                // const glyph_ids = reader.curLoc(u16);
+                for (0..1 << 7) |code| {
+                    for (end_codes, 0..) |end_code, idx| {
+                        const end = @byteSwap(end_code);
+                        if (end >= code) {
+                            const start = @byteSwap(start_codes[idx]);
+                            if (start <= code) {
+                                const delta = @byteSwap(id_deltas[idx]);
+                                const range_offset = @byteSwap(id_range[idx]);
+                                if (range_offset == 0) {
+                                    const glyph_id = (code + delta) % 0xFFFF;
+                                    CMAP.put(@intCast(code), @intCast(glyph_id)) catch unreachable;
+                                } else {
+                                    const glyph_id = id_range_start[idx + (code - start) + range_offset / 2];
+                                    CMAP.put(@intCast(code), @intCast(glyph_id)) catch unreachable;
+                                    // assert(false);
+                                }
+                            } else {
+                                // CMAP.put(@intCast(code), 0) catch unreachable;
+                                break;
+                            }
+                        }
+                    }
+                }
+            },
+            12 => {
+                reader.skipBytes(@sizeOf(u16) + @sizeOf(u32) * 2);
+                const num_grps = reader.readType(u32);
 
-        // support only basic ASCII
-        for (0..num_grps) |_| {
-            const start_code = reader.readType(u32);
-            if (start_code > 1 << 7) break;
-            const end_code = reader.readType(u32);
-            const glyph_id = reader.readType(u32);
+                // support only basic ASCII
+                for (0..num_grps) |_| {
+                    const start_code = reader.readType(u32);
+                    if (start_code > 1 << 7) break;
+                    const end_code = reader.readType(u32);
+                    const glyph_id = reader.readType(u32);
 
-            for (start_code..end_code + 1, 0..) |code, idx| {
-                CMAP.put(@intCast(code), @intCast(glyph_id + idx)) catch unreachable;
-            }
+                    for (start_code..end_code + 1, 0..) |code, idx| {
+                        CMAP.put(@intCast(code), @intCast(glyph_id + idx)) catch unreachable;
+                    }
+                }
+            },
+            else => assert(false),
         }
 
         return;
@@ -173,6 +224,84 @@ pub fn draw_char(g: Glyph, target_buf: DrawBuffer, off_x: isize, off_y: isize) v
 
     switch (g.data) {
         .simple => |d| {
+            for (d.end_pts_of_contour, 0..) |end_pt, i| {
+                const num_points = if (i == 0) end_pt + 1 else end_pt - d.end_pts_of_contour[i - 1];
+                const start_pt = if (i == 0) 0 else d.end_pts_of_contour[i - 1] + 1;
+                const pts = d.coords[start_pt .. end_pt + 1];
+
+                var it: usize = 0;
+                if (!pts[it].on_curve) it += 1;
+                var covered_pts: usize = 0;
+
+                while (covered_pts < num_points) : (covered_pts += 2) {
+                    const p1 = pts[(it + covered_pts) % num_points];
+                    const p2 = pts[(it + covered_pts + 1) % num_points];
+                    const p3 = pts[(it + covered_pts + 2) % num_points];
+
+                    const from = Vec2{
+                        .x = scale_funits_to_pixels(p1.x) + off_x,
+                        .y = scale_funits_to_pixels(p1.y) + off_y,
+                    };
+                    const mid = Vec2{
+                        .x = scale_funits_to_pixels(p2.x) + off_x,
+                        .y = scale_funits_to_pixels(p2.y) + off_y,
+                    };
+                    const to = Vec2{
+                        .x = scale_funits_to_pixels(p3.x) + off_x,
+                        .y = scale_funits_to_pixels(p3.y) + off_y,
+                    };
+                    // print("going from {},{} to {},{}\r\n", .{ from.x, from.y, to.x, to.y });
+                    draw_curve(target_buf, from, mid, to);
+                }
+            }
+        },
+        .compound => {},
+    }
+    for (@intCast(off_x)..@intCast(off_x + scale_funits_to_pixels(g.x_max) + 1)) |x| {
+        for (@intCast(off_y)..@intCast(off_y + scale_funits_to_pixels(g.y_max) + 1)) |y| {
+            switch (g.data) {
+                .simple => |d| {
+                    var intersections: usize = 0;
+                    for (d.end_pts_of_contour, 0..) |end_pt, i| {
+                        const num_points = if (i == 0) end_pt + 1 else end_pt - d.end_pts_of_contour[i - 1];
+                        const start_pt = if (i == 0) 0 else d.end_pts_of_contour[i - 1] + 1;
+                        const pts = d.coords[start_pt .. end_pt + 1];
+
+                        var it: usize = 0;
+                        if (!pts[it].on_curve) it += 1;
+                        var covered_pts: usize = 0;
+
+                        while (covered_pts < num_points) : (covered_pts += 2) {
+                            const p1 = pts[(it + covered_pts) % num_points];
+                            const p2 = pts[(it + covered_pts + 1) % num_points];
+                            const p3 = pts[(it + covered_pts + 2) % num_points];
+
+                            const from = Vec2{
+                                .x = scale_funits_to_pixels(p1.x) + off_x,
+                                .y = scale_funits_to_pixels(p1.y) + off_y,
+                            };
+                            const mid = Vec2{
+                                .x = scale_funits_to_pixels(p2.x) + off_x,
+                                .y = scale_funits_to_pixels(p2.y) + off_y,
+                            };
+                            const to = Vec2{
+                                .x = scale_funits_to_pixels(p3.x) + off_x,
+                                .y = scale_funits_to_pixels(p3.y) + off_y,
+                            };
+
+                            intersections += ray_intersections(from, mid, to, x, y);
+                        }
+                    }
+                    if (intersections % 2 == 1) {
+                        target_buf.put_pixel(@intCast(x), @intCast(y), Color{ .r = 255, .g = 0, .b = 0 });
+                    }
+                },
+                .compound => {},
+            }
+        }
+    }
+    switch (g.data) {
+        .simple => |d| {
             var start_pt: usize = 0;
             var i: usize = 0;
             for (d.end_pts_of_contour) |end_pt| {
@@ -198,57 +327,14 @@ pub fn draw_char(g: Glyph, target_buf: DrawBuffer, off_x: isize, off_y: isize) v
                         .x = scale_funits_to_pixels(p3.x) + off_x,
                         .y = scale_funits_to_pixels(p3.y) + off_y,
                     };
-                    // print("going from {},{} to {},{}\r\n", .{ from.x, from.y, to.x, to.y });
-                    draw_curve(target_buf, from, mid, to);
+                    target_buf.put_pixel(@intCast(from.x), @intCast(from.y), if (p1.on_curve) Color{ .r = 0, .g = 0, .b = 255 } else Color{ .r = 0, .g = 255, .b = 0 });
+                    target_buf.put_pixel(@intCast(mid.x), @intCast(mid.y), if (p2.on_curve) Color{ .r = 0, .g = 0, .b = 255 } else Color{ .r = 0, .g = 255, .b = 0 });
+                    target_buf.put_pixel(@intCast(to.x), @intCast(to.y), if (p3.on_curve) Color{ .r = 0, .g = 0, .b = 255 } else Color{ .r = 0, .g = 255, .b = 0 });
                 }
                 start_pt = end_pt + 1;
             }
         },
         .compound => {},
-    }
-    for (@intCast(off_x)..@intCast(off_x + scale_funits_to_pixels(g.x_max) + 1)) |x| {
-        for (@intCast(off_y)..@intCast(off_y + scale_funits_to_pixels(g.y_max) + 1)) |y| {
-            switch (g.data) {
-                .simple => |d| {
-                    var start_pt: usize = 0;
-                    var i: usize = 0;
-                    for (d.end_pts_of_contour) |end_pt| {
-                        var intersections: usize = 0;
-                        while (i < end_pt) : (i += 2) {
-                            const p1 = d.coords[i];
-                            const p2 = d.coords[i + 1];
-                            var p3: Coord = undefined;
-                            if (i == end_pt - 1) {
-                                p3 = d.coords[start_pt];
-                            } else {
-                                p3 = d.coords[i + 2];
-                            }
-
-                            const from = Vec2{
-                                .x = scale_funits_to_pixels(p1.x) + off_x,
-                                .y = scale_funits_to_pixels(p1.y) + off_y,
-                            };
-                            const mid = Vec2{
-                                .x = scale_funits_to_pixels(p2.x) + off_x,
-                                .y = scale_funits_to_pixels(p2.y) + off_y,
-                            };
-                            const to = Vec2{
-                                .x = scale_funits_to_pixels(p3.x) + off_x,
-                                .y = scale_funits_to_pixels(p3.y) + off_y,
-                            };
-
-                            intersections += ray_intersections(from, mid, to, x, y);
-                        }
-                        start_pt = end_pt + 1;
-                        if (intersections % 2 == 1) {
-                            target_buf.put_pixel(@intCast(x), @intCast(y), Color{ .r = 255, .g = 0, .b = 0 });
-                            // target_buf.blit();
-                        }
-                    }
-                },
-                .compound => {},
-            }
-        }
     }
 }
 
@@ -566,7 +652,6 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
             for (data.simple.end_pts_of_contour, 0..) |end_pt, j| {
                 const start_pt: usize = if (j == 0) 0 else data.simple.end_pts_of_contour[j - 1] + 1;
                 while (k <= end_pt + inserted) : (k += 1) {
-                    // implied mid point between these 2 coords is on curve
                     const p1 = coords.items[k];
                     var p2: Coord = undefined;
                     if (k == end_pt + inserted) {
@@ -574,6 +659,7 @@ fn glyf(allocator: Allocator, bytes: []const u8) !void {
                     } else {
                         p2 = coords.items[k + 1];
                     }
+                    // implied mid point between these 2 coords is on curve
                     if (!p1.on_curve and !p2.on_curve) {
                         const mid = Coord{ .x = (p1.x + p2.x) / 2, .y = (p1.y + p2.y) / 2, .on_curve = true };
                         try coords.insert(k + 1, mid);
@@ -630,11 +716,32 @@ const Maxp = struct {
 };
 
 test {
+    const testing = @import("std").testing;
     const cwd = std.fs.cwd();
-    const f = try cwd.openFile("out/efi/boot/SF-Pro.ttf", std.fs.File.OpenFlags{});
+    const f = try cwd.openFile("out/efi/boot/Helvetica.ttf", std.fs.File.OpenFlags{});
     var buf: [1024 * 1024 * 10]u8 = undefined;
-    print("size: {}\n", .{@sizeOf(u16)});
+    std.debug.print("size: {}\n", .{@sizeOf(u16)});
     const size = try f.readAll(&buf);
     try ttf_load(std.testing.allocator, buf[0..size]);
-    ttf_unload(std.testing.allocator);
+    defer ttf_unload(std.testing.allocator);
+    const g = glyphs[CMAP.get('B').?];
+    std.debug.print("{}\n", .{g});
+    std.debug.print("{}\n", .{g.data});
+    const c1 = g.data.simple.end_pts_of_contour[0];
+    // const c2 = g.data.simple.end_pts_of_contour[1];
+    std.debug.print("{any}\n\n", .{g.data.simple.coords[0 .. c1 + 1]});
+    std.debug.print("{any}\n", .{g.data.simple.coords[c1 + 1 ..]});
+    for (g.data.simple.coords[0 .. c1 + 1]) |a| {
+        for (g.data.simple.coords[c1 + 1 ..]) |b| {
+            testing.expect(b.x <= a.x) catch {
+                std.debug.print("a: {} b: {}\n", .{ a, b });
+            };
+        }
+    }
+}
+
+test "floats" {
+    const f: f32 = 0.0;
+    const a: f32 = 0.0;
+    print("{}\n", .{a / f});
 }
