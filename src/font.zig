@@ -7,6 +7,7 @@ const DrawBuffer = @import("main.zig").DrawBuffer;
 const Color = @import("main.zig").Color;
 const builtin = @import("builtin");
 const dbg = builtin.mode == builtin.Mode.Debug;
+const Vec2 = @import("vec.zig").Vec2;
 
 const TableRecord = struct {
     tag: [4]u8,
@@ -50,7 +51,6 @@ pub fn ttf_load(allocator: Allocator, bytes: []const u8) !void {
     // var cmap = std.hash_map.AutoHashMap(u8, u16);
     CMAP = std.hash_map.AutoHashMap(u8, u16).init(allocator);
     cmap_parse(bytes);
-    print("{}\n", .{CMAP.get('H').?});
     locs = try allocator.alloc(u32, MAXP.num_glyphs);
     try loca(HEAD.index_to_loc_format, bytes[find_record("loca").?.offset..]);
     print("locs length: {}\n", .{locs.len});
@@ -99,6 +99,7 @@ fn cmap_parse(bytes: []const u8) void {
     // just use the first one, expecting unicode platform
     for (0..num_subtables) |_| {
         const platform_id = reader.readType(u16);
+        print("platform: {}\n", .{platform_id});
         if (platform_id != 0) {
             reader.skipBytes(@sizeOf(u16) + @sizeOf(u32));
             continue;
@@ -289,7 +290,7 @@ pub fn draw_char(g: Glyph, target_buf: DrawBuffer, off_x: isize, off_y: isize) v
                                 .y = scale_funits_to_pixels(p3.y) + off_y,
                             };
 
-                            intersections += ray_intersections(from, mid, to, x, y);
+                            intersections += ray_intersections(from, mid, to, x, y, false);
                         }
                     }
                     if (intersections % 2 == 1) {
@@ -338,6 +339,10 @@ pub fn draw_char(g: Glyph, target_buf: DrawBuffer, off_x: isize, off_y: isize) v
     }
 }
 
+pub fn draw_cursor(target_buf: DrawBuffer, off: Vec2) void {
+    bresenham_line(target_buf, Vec2{ .x = off.x, .y = off.y }, Vec2{ .x = off.x + 1, .y = off.y + 1 });
+}
+
 fn scale_funits_to_pixels(val: isize) i64 {
     const font_size = 50.0;
     const ppi = 227.0;
@@ -346,7 +351,7 @@ fn scale_funits_to_pixels(val: isize) i64 {
     return @intFromFloat(@round(@as(f32, @floatFromInt(val)) * scale));
 }
 
-fn ray_intersections(p1: Vec2, p2: Vec2, p3: Vec2, ray_origin_x: usize, y_shift: usize) usize {
+fn ray_intersections(p1: Vec2, p2: Vec2, p3: Vec2, ray_origin_x: usize, y_shift: usize, debug: bool) usize {
     // the equation of a bezier curve is (p1 - 2p2 + p3)t^2 + 2t(p2-p1) + p1
     // we want to test how many intersections a horizontal line at y_shift makes with this curve
     // what value of t will make the resulting bezier point 0
@@ -356,23 +361,46 @@ fn ray_intersections(p1: Vec2, p2: Vec2, p3: Vec2, ray_origin_x: usize, y_shift:
     const c: f32 = @floatFromInt(p1.y - @as(isize, @intCast(y_shift)));
 
     var intersections: usize = 0;
+    var prev_t: f32 = 0;
     if (a == 0) {
         const t = -c / b;
-        if (is_valid_intersection(t, p1, p2, p3, ray_origin_x)) intersections += 1;
+        if (is_valid_intersection(t, p1, p2, p3, ray_origin_x)) {
+            intersections += 1;
+            prev_t = t;
+            if (debug) print("intersection! t: {}\n", .{t});
+        }
+        // if (b == 0 and c == 0 and ) intersections += 1;
     } else {
         // quadratic formula
         const temp = @sqrt(b * b - 4 * a * c);
         const t_plus = (-b + temp) / (2 * a);
         const t_minus = (-b - temp) / (2 * a);
         // only care about values between 0 and 1 since we only interpolate between these
-        if (is_valid_intersection(t_plus, p1, p2, p3, ray_origin_x)) intersections += 1;
-        if (is_valid_intersection(t_minus, p1, p2, p3, ray_origin_x)) intersections += 1;
+        // need to check if intersected point is double counted
+        if (is_valid_intersection(t_plus, p1, p2, p3, ray_origin_x)) {
+            if (debug) print("intersection! t: {}\n", .{t_plus});
+            if (t_plus <= 0.0002 and prev_t >= 1 - 0.0002) {
+                prev_t = 0;
+            } else {
+                prev_t = t_plus;
+                intersections += 1;
+            }
+        }
+        if (is_valid_intersection(t_minus, p1, p2, p3, ray_origin_x)) {
+            if (debug) print("intersection! t: {}\n", .{t_minus});
+            if (t_minus <= 0.0002 and prev_t >= 1 - 0.0002) {
+                prev_t = 0;
+            } else {
+                prev_t = t_minus;
+                intersections += 1;
+            }
+        }
     }
     return intersections;
 }
 
 fn is_valid_intersection(t: f32, p1: Vec2, p2: Vec2, p3: Vec2, ray_origin_x: usize) bool {
-    return t >= 0 and t < 1 and bezier_interp(p1, p2, p3, t).x >= ray_origin_x;
+    return t >= 0 and t <= 1 and bezier_interp(p1, p2, p3, t).x > ray_origin_x;
 }
 
 fn bresenham_line(target_buf: DrawBuffer, from: Vec2, to: Vec2) void {
@@ -428,10 +456,10 @@ fn bezier_interp(p1: Vec2, p2: Vec2, p3: Vec2, t: f64) Vec2 {
 }
 
 fn draw_curve(target_buf: DrawBuffer, p1: Vec2, p2: Vec2, p3: Vec2) void {
-    const res = 2;
+    const res = 20.0;
     var prev = bezier_interp(p1, p2, p3, 0);
     for (0..res) |i| {
-        const t = (1.0 + @as(f32, @floatFromInt(i))) / res;
+        const t: f32 = (1.0 + @as(f32, @floatFromInt(i))) / res;
         const cur = bezier_interp(p1, p2, p3, t);
         bresenham_line(target_buf, prev, cur);
         prev = cur;
@@ -479,23 +507,6 @@ const Coord = struct {
     x: u16,
     y: u16,
     on_curve: bool,
-};
-
-const Vec2 = struct {
-    x: i64,
-    y: i64,
-
-    pub fn add(self: Vec2, other: Vec2) Vec2 {
-        return Vec2{ .x = self.x + other.x, .y = self.y + other.y };
-    }
-
-    pub fn sub(self: Vec2, other: Vec2) Vec2 {
-        return Vec2{ .x = self.x - other.x, .y = self.y - other.y };
-    }
-
-    pub fn mult(self: Vec2, s: f64) Vec2 {
-        return Vec2{ .x = @intFromFloat(@as(f64, @floatFromInt(self.x)) * s), .y = @intFromFloat(@as(f64, @floatFromInt(self.y)) * s) };
-    }
 };
 
 const GlyphData = union(GlyphDataKind) {

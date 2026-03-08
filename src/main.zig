@@ -5,6 +5,7 @@ const fmt = std.fmt;
 const bmp = @import("bmp.zig");
 const font = @import("font.zig");
 const builtin = @import("builtin");
+const Vec2 = @import("vec.zig").Vec2;
 
 // Assigned in main().
 var con_out: *uefi.protocol.SimpleTextOutput = undefined;
@@ -28,9 +29,11 @@ fn puts(msg: []const u8) void {
 var print_buf: [10 * 1024]u8 = undefined;
 
 pub fn print(comptime format: []const u8, args: anytype) void {
+    // if (true) std.debug.print(format, args);
     if (builtin.os.tag == .uefi) {
         if (fmt.bufPrint(&print_buf, format, args)) |written| {
             puts(written);
+            puts("\r\n");
         } else |_| {
             puts("could not fit in print buffer\r\n");
         }
@@ -40,6 +43,10 @@ pub fn print(comptime format: []const u8, args: anytype) void {
 }
 
 var graphics_output_protocol: ?*uefi.protocol.GraphicsOutput = undefined;
+var simple_pointer_protocol: ?*uefi.protocol.SimplePointer = undefined;
+var pointer_state = uefi.protocol.SimplePointer.State{ .left_button = false, .right_button = false, .relative_movement_x = 0, .relative_movement_y = 0, .relative_movement_z = 0 };
+var pointer_loc = Vec2{ .x = 0, .y = 0 };
+
 pub fn main() void {
     con_out = uefi.system_table.con_out.?;
     puts("testing");
@@ -52,7 +59,7 @@ pub fn main() void {
     // Graphics output?
     status = boot_services.locateProtocol(&uefi.protocol.GraphicsOutput.guid, null, @ptrCast(&graphics_output_protocol));
     if (status != uefi.Status.Success) {
-        print("*** graphics output protocol not supported because {}!\r\n", .{status});
+        print("*** graphics output protocol not supported because {}!", .{status});
         return;
     }
     // Check supported resolutions:
@@ -63,21 +70,21 @@ pub fn main() void {
         while (i < graphics_output_protocol.?.mode.max_mode) : (i += 1) {
             status = graphics_output_protocol.?.queryMode(i, &info_size, &info);
             if (status != uefi.Status.Success) {
-                print("unable to query graphics_output_protocol mode because {}\r\n", .{status});
+                print("unable to query graphics_output_protocol mode because {}", .{status});
                 continue;
             }
-            print("graphics_output_protocol mode {} {}\r\n", .{ info.horizontal_resolution, info.vertical_resolution });
+            print("graphics_output_protocol mode {} {}", .{ info.horizontal_resolution, info.vertical_resolution });
             if (info.horizontal_resolution == 1920 and info.vertical_resolution == 1080) {
                 status = graphics_output_protocol.?.setMode(i);
                 if (status != uefi.Status.Success) {
-                    print("unable to set graphics_output_protocol mode because {}\r\n", .{status});
+                    print("unable to set graphics_output_protocol mode because {}", .{status});
                 }
                 break;
             }
         }
         status = graphics_output_protocol.?.queryMode(graphics_output_protocol.?.mode.mode, &info_size, &info);
         if (status != uefi.Status.Success) {
-            print("unable to query the current graphics_output_protocol mode because {}, exiting...\r\n", .{status});
+            print("unable to query the current graphics_output_protocol mode because {}, exiting...", .{status});
             return;
         }
         resolution_x = info.horizontal_resolution;
@@ -87,7 +94,7 @@ pub fn main() void {
     var fs: ?*uefi.protocol.SimpleFileSystem = undefined;
     status = boot_services.locateProtocol(&uefi.protocol.SimpleFileSystem.guid, null, @ptrCast(&fs));
     if (status != uefi.Status.Success) {
-        print("*** file system protocol not supported because {}!\r\n", .{status});
+        print("*** file system protocol not supported because {}!", .{status});
         return;
     }
     status = fs.?.openVolume(&volume);
@@ -111,7 +118,7 @@ pub fn main() void {
         print("failed to load image because {}", .{err});
         return;
     };
-    print("image pixels {} height {} width {}\r\n", .{ wp.pixels.len, wp.height, wp.width });
+    print("image pixels {} height {} width {}", .{ wp.pixels.len, wp.height, wp.width });
     const blt_buffer = uefi.pool_allocator.alloc(uefi.protocol.GraphicsOutput.BltPixel, resolution_x * resolution_y) catch |err| {
         print("failed to alloc blt buffer because {}", .{err});
         return;
@@ -123,7 +130,7 @@ pub fn main() void {
         return;
     };
     defer uefi.pool_allocator.free(ttf);
-    const ttf_size = open_file(ttf, "efi\\boot\\SF-Pro.ttf") catch |err| {
+    const ttf_size = open_file(ttf, "efi\\boot\\Helvetica.ttf") catch |err| {
         print("failed to open font file because {}", .{err});
         return;
     };
@@ -131,7 +138,7 @@ pub fn main() void {
         print("failed to load font file because {}", .{err});
         return;
     };
-    print("font file loaded!\r\n", .{});
+    print("font file loaded!", .{});
     defer font.ttf_unload(uefi.pool_allocator);
     status = graphics_output_protocol.?.blt(blt_buffer.ptr, uefi.protocol.GraphicsOutput.BltOperation.BltBufferToVideo, 0, 0, 0, 0, resolution_x, resolution_y, 0);
     if (status != uefi.Status.Success) {
@@ -139,11 +146,32 @@ pub fn main() void {
         return;
     }
     const draw_buffer = DrawBuffer{ .pixels = blt_buffer, .width = resolution_x, .height = resolution_y };
-    font.draw("ABCDEFGHIJKLMNOPQRSTUVWXYZ", draw_buffer);
+    font.draw("Bd", draw_buffer);
+
+    status = boot_services.locateProtocol(&uefi.protocol.SimplePointer.guid, null, @ptrCast(&simple_pointer_protocol));
+    if (status != uefi.Status.Success) {
+        print("simple_pointer_protocol not supported because {}!", .{status});
+        const USB2_HC_PROTOCOL_GUID align(8) = uefi.Guid{
+            .time_low = 0x3e745226,
+            .time_mid = 0x9818,
+            .time_high_and_version = 0x45b6,
+            .clock_seq_high_and_reserved = 0xa2,
+            .clock_seq_low = 0xac,
+            .node = [_]u8{ 0xd7, 0xcd, 0x0e, 0x8b, 0xa2, 0xbc },
+        };
+        var num_handles: u64 = 0;
+        var buffer: [*]uefi.Handle = undefined;
+        status = boot_services.locateHandleBuffer(uefi.tables.LocateSearchType.ByProtocol, &USB2_HC_PROTOCOL_GUID, null, &num_handles, &buffer);
+        print("number of USB handles found: {}", .{num_handles});
+        return;
+    }
+    const pointer_mode = simple_pointer_protocol.?.mode;
+    _ = simple_pointer_protocol.?.getState(&pointer_state);
 
     // Create an array of input events.
     const input_events = [_]uefi.Event{
         uefi.system_table.con_in.?.wait_for_key,
+        simple_pointer_protocol.?.wait_for_input,
     };
     // TODO add more input events
 
@@ -153,17 +181,26 @@ pub fn main() void {
         // index tells us which event has been signalled.
 
         // Key event
-        if (index == 0) {
-            var input_key: uefi.protocol.SimpleTextInput.Key.Input = undefined;
-            if (uefi.system_table.con_in.?.readKeyStroke(&input_key) == uefi.Status.Success) {
-                switch (input_key.scan_code) {
-                    1 => {
-                        draw_buffer.reset();
-                        font.draw("B", draw_buffer);
-                    },
-                    else => {},
+        switch (index) {
+            0 => {
+                var input_key: uefi.protocol.SimpleTextInput.Key.Input = undefined;
+                if (uefi.system_table.con_in.?.readKeyStroke(&input_key) == uefi.Status.Success) {
+                    switch (input_key.scan_code) {
+                        1 => {
+                            draw_buffer.reset();
+                            font.draw("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", draw_buffer);
+                        },
+                        else => {},
+                    }
                 }
-            }
+            },
+            1 => {
+                _ = simple_pointer_protocol.?.getState(&pointer_state);
+                pointer_loc.x += @divExact(pointer_state.relative_movement_x, @as(i32, @intCast(pointer_mode.resolution_x)));
+                pointer_loc.y += @divExact(pointer_state.relative_movement_y, @as(i32, @intCast(pointer_mode.resolution_y)));
+                font.draw_cursor(draw_buffer, pointer_loc);
+            },
+            else => {},
         }
     }
 }
@@ -186,7 +223,7 @@ fn open_file(read_buf: []u8, path: []const u8) !usize {
     if (status != uefi.Status.Success) {
         return FileError.ReadError;
     }
-    print("size of file {}\r\n", .{size});
+    print("size of file {}", .{size});
     return size;
 }
 
